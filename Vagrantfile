@@ -1,0 +1,135 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# All Vagrant configuration is done below. The "2" in Vagrant.configure
+# configures the configuration version (we support older styles for
+# backwards compatibility). Please don't change it unless you know what
+# you're doing.
+Vagrant.configure("2") do |config|
+  # The most common configuration options are documented and commented below.
+  # For a complete reference, please see the online documentation at
+  # https://docs.vagrantup.com.
+
+  # Every Vagrant development environment requires a box. You can search for
+  # boxes at https://vagrantcloud.com/search.
+  config.vm.box = "bento/ubuntu-20.04"
+
+  # Disable automatic box update checking. If you disable this, then
+  # boxes will only be checked for updates when the user runs
+  # `vagrant box outdated`. This is not recommended.
+  # config.vm.box_check_update = false
+
+  # Create a forwarded port mapping which allows access to a specific port
+  # within the machine from a port on the host machine. In the example below,
+  # accessing "localhost:8080" will access port 80 on the guest machine.
+  # NOTE: This will enable public access to the opened port
+  # config.vm.network "forwarded_port", guest: 80, host: 8080
+
+  # Create a forwarded port mapping which allows access to a specific port
+  # within the machine from a port on the host machine and only allow access
+  # via 127.0.0.1 to disable public access
+  # config.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "127.0.0.1"
+
+  # Create a private network, which allows host-only access to the machine
+  # using a specific IP.
+  config.vm.network "private_network", ip: "192.168.33.10"
+
+  # Create a public network, which generally matched to bridged network.
+  # Bridged networks make the machine appear as another physical device on
+  # your network.
+  # config.vm.network "public_network"
+
+  # Share an additional folder to the guest VM. The first argument is
+  # the path on the host to the actual folder. The second argument is
+  # the path on the guest to mount the folder. And the optional third
+  # argument is a set of non-required options.
+  # config.vm.synced_folder "../data", "/vagrant_data"
+
+  # Provider-specific configuration so you can fine-tune various
+  # backing providers for Vagrant. These expose provider-specific options.
+  # Example for VirtualBox:
+  #
+  config.vm.provider "virtualbox" do |vb|
+  #   # Display the VirtualBox GUI when booting the machine
+  #   vb.gui = true
+  #
+  #   # Customize the amount of memory on the VM:
+    vb.memory = "4096"
+  end
+  #
+  # View the documentation for the provider you are using for more
+  # information on available options.
+
+  # Enable provisioning with a shell script. Additional provisioners such as
+  # Ansible, Chef, Docker, Puppet and Salt are also available. Please see the
+  # documentation for more information about their specific syntax and use.
+  config.vm.provision "shell", inline: <<-SHELL
+sudo su
+export DEBIAN_FRONTEND=noninteractive 
+apt -q update -y
+apt -q install openjdk-11-jdk-headless universal-ctags git python3-pip -y
+
+mkdir -p /opengrok/{src,data,dist,etc,log}
+wget --quiet https://github.com/oracle/opengrok/releases/download/1.7.2/opengrok-1.7.2.tar.gz -P /tmp
+tar -C /opengrok/dist --strip-components=1 -xzf /tmp/opengrok-1*tar.gz 
+
+cat <<EOT >> /opengrok/etc/logging.properties
+handlers= java.util.logging.FileHandler, java.util.logging.ConsoleHandler
+
+java.util.logging.FileHandler.pattern = /opengrok/log/opengrok%g.%u.log
+java.util.logging.FileHandler.append = false
+java.util.logging.FileHandler.limit = 0
+java.util.logging.FileHandler.count = 30
+java.util.logging.FileHandler.level = ALL
+java.util.logging.FileHandler.formatter = org.opengrok.indexer.logger.formatter.SimpleFileLogFormatter
+
+java.util.logging.ConsoleHandler.level = WARNING
+java.util.logging.ConsoleHandler.formatter = org.opengrok.indexer.logger.formatter.SimpleFileLogFormatter
+
+org.opengrok.level = FINE
+EOT
+
+wget --quiet https://downloads.apache.org/tomcat/tomcat-10/v10.0.5/bin/apache-tomcat-10.0.5.tar.gz -P /tmp
+mkdir /opt/tomcat
+tar xzvf /tmp/apache-tomcat-10*tar.gz -C /opt/tomcat --strip-components=1
+
+cat <<EOT >> /etc/systemd/system/tomcat.service 
+[Unit]
+Description=Tomcat
+After=network.target
+
+[Service]
+Type=forking
+
+User=root
+Group=root
+
+Environment="JAVA_HOME=/usr/lib/jvm/java-1.11.0-openjdk-amd64"
+Environment="JAVA_OPTS=-Djava.security.egd=file:///dev/urandom"
+Environment="CATALINA_BASE=/opt/tomcat"
+Environment="CATALINA_HOME=/opt/tomcat"
+Environment="CATALINA_PID=/opt/tomcat/temp/tomcat.pid"
+Environment="CATALINA_OPTS=-Xms512M -Xmx2048M -server -XX:+UseParallelGC"
+
+ExecStart=/opt/tomcat/bin/startup.sh
+ExecStop=/opt/tomcat/bin/shutdown.sh
+
+[Install]
+WantedBy=multi-user.target
+EOT
+
+systemctl daemon-reload 
+systemctl start tomcat.service 
+systemctl enable tomcat.service 
+
+python3 -m pip install /opengrok/dist/tools/opengrok-tools.tar.gz
+git clone https://github.com/gstimac/jiracli.git /opengrok/src/jiracli
+
+opengrok-deploy -c /opengrok/etc/configuration.xml /opengrok/dist/lib/source.war /opt/tomcat/webapps
+opengrok-indexer \
+ -J=-Djava.util.logging.config.file=/opengrok/etc/logging.properties     \
+ -a /opengrok/dist/lib/opengrok.jar --     -c /usr/bin/ctags     \
+ -s /opengrok/src -d /opengrok/data -H -P -S -G     \
+ -W /opengrok/etc/configuration.xml -U http://localhost:8080/source
+  SHELL
+end
